@@ -41,7 +41,7 @@ struct NotchView: View {
     @State private var dropTargeted = false
 
     var body: some View {
-        let expanded = vm.state != .collapsed
+        let expanded = vm.state != .collapsed && !vm.isCompactLock
         let size = vm.contentSize      // animates (together with `state`) on one spring
 
         ZStack(alignment: .top) {
@@ -59,6 +59,20 @@ struct NotchView: View {
                 expandedContent(.shelf) { ShelfView(vm: vm, shelf: vm.shelf) }
             case .search:
                 expandedContent(.search) { SearchView(vm: vm, search: vm.search) }
+            case .calculator:
+                expandedContent(.calculator) { CalculatorView(vm: vm, calc: vm.calc) }
+            case .locked:
+                if vm.media.hasTrack {
+                    expandedContent(.locked) { LockedView(media: vm.media) }
+                        .overlay(alignment: .topTrailing) {      // padlock sits in the notch row
+                            LockIcon(phase: vm.lockPhase)
+                                .padding(.trailing, NotchLayout.ear + 16)
+                                .frame(height: vm.notch.height)
+                        }
+                } else {
+                    LockPill(notch: vm.notch, phase: vm.lockPhase)
+                        .transition(.opacity)
+                }
             }
         }
         .frame(width: size.width, height: size.height, alignment: .top)
@@ -189,6 +203,7 @@ struct TabBar: View {
             if settings.isOn(.tabMedia) { tab("music.note", .media) }
             if settings.isOn(.tabClipboard) { tab("doc.on.clipboard", .clipboard) }
             if settings.isOn(.tabShelf) { tab("tray", .shelf) }
+            if settings.isOn(.tabCalculator) { tab("plus.forwardslash.minus", .calculator) }
             if settings.isOn(.tabSearch) { tab("magnifyingglass", .search) }
             Spacer()
         }
@@ -616,5 +631,152 @@ struct ShelfTile: View {
             Button("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting([item.url]) }
             Button("Remove") { onRemove() }
         }
+    }
+}
+
+// MARK: - Calculator
+
+struct CalculatorView: View {
+    @ObservedObject var vm: NotchViewModel
+    @ObservedObject var calc: CalculatorModel
+
+    private let rows: [[String]] = [
+        ["C", "(", ")", "÷"],
+        ["7", "8", "9", "×"],
+        ["4", "5", "6", "−"],
+        ["1", "2", "3", "+"],
+        ["0", ".", "^", "="],
+    ]
+
+    var body: some View {
+        VStack(spacing: 8) {
+            TabBar(vm: vm)
+            HStack(alignment: .top, spacing: 12) {
+                display
+                keypad.frame(width: 200)
+            }
+            .frame(height: 141)
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 4)
+        .padding(.bottom, 14)
+    }
+
+    private var display: some View {
+        VStack(alignment: .trailing, spacing: 4) {
+            Text(calc.result == nil ? " " : calc.expression)
+                .font(.system(size: 13, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .lineLimit(1).truncationMode(.head)
+            Spacer(minLength: 0)
+            Text(calc.result ?? (calc.expression.isEmpty ? "0" : calc.expression))
+                .font(.system(size: 26, weight: .semibold, design: .rounded))
+                .lineLimit(1).minimumScaleFactor(0.4)
+            HStack(spacing: 14) {
+                Button { calc.press("⌫") } label: { Image(systemName: "delete.left") }
+                Button { calc.copyResult() } label: { Image(systemName: "doc.on.doc") }
+            }
+            .buttonStyle(PressStyle())
+            .foregroundStyle(.secondary)
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
+        .background(Color.white.opacity(0.09), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    private var keypad: some View {
+        VStack(spacing: 4) {
+            ForEach(rows, id: \.self) { row in
+                HStack(spacing: 4) {
+                    ForEach(row, id: \.self) { key in keyButton(key) }
+                }
+            }
+        }
+    }
+
+    private func keyButton(_ key: String) -> some View {
+        Button { calc.press(key) } label: {
+            Text(key)
+                .font(.system(size: 15, weight: .medium))
+                .frame(maxWidth: .infinity)
+                .frame(height: 25)
+                .background(fill(for: key), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+        }
+        .buttonStyle(PressStyle())
+    }
+
+    private func fill(for key: String) -> Color {
+        switch key {
+        case "=": return .orange
+        case "+", "−", "×", "÷", "^": return Color.white.opacity(0.2)
+        default: return Color.white.opacity(0.09)
+        }
+    }
+}
+
+// MARK: - Lock screen
+
+struct LockIcon: View {
+    let phase: LockPhase
+    var body: some View {
+        Image(systemName: phase == .unlocking ? "lock.open.fill" : "lock.fill")
+            .font(.system(size: 13, weight: .semibold))
+            .foregroundStyle(phase == .unlocking ? Color.green : Color.white)
+            .contentTransition(.symbolEffect(.replace))
+            .animation(.spring(response: 0.3, dampingFraction: 0.7), value: phase)
+    }
+}
+
+/// Locked and nothing playing: the plain notch pill with a padlock on the right.
+struct LockPill: View {
+    let notch: CGSize
+    let phase: LockPhase
+    var body: some View {
+        HStack {
+            Spacer()
+            LockIcon(phase: phase)
+        }
+        .padding(.horizontal, 14)
+        .frame(height: notch.height)
+    }
+}
+
+/// Compact music player shown while the Mac is locked.
+struct LockedView: View {
+    @ObservedObject var media: MediaController
+
+    var body: some View {
+        VStack(spacing: 8) {
+            HStack(spacing: 12) {
+                ArtworkView(image: media.artwork)
+                    .frame(width: 52, height: 52)
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(media.title).font(.subheadline.weight(.semibold)).lineLimit(1)
+                    Text(media.artist).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                }
+                Spacer(minLength: 8)
+                if media.isPlaying { EqualizerBars() }
+            }
+            ProgressRow(media: media)
+            HStack(spacing: 30) {
+                button("backward.fill") { media.previous() }
+                button(media.isPlaying ? "pause.fill" : "play.fill") { media.togglePlayPause() }
+                button("forward.fill") { media.next() }
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 4)
+        .padding(.bottom, 12)
+    }
+
+    private func button(_ symbol: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.title3)
+                .frame(width: 32, height: 28)
+                .contentTransition(.symbolEffect(.replace))
+        }
+        .buttonStyle(PressStyle())
     }
 }

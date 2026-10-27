@@ -1,0 +1,1 @@
+   hotKey = GlobalHotKey(id: 1, keyCode: kVK_Space, modifiers: cmdKey) { [weak self] in

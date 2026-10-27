@@ -2,7 +2,10 @@ import SwiftUI
 import AppKit
 import Combine
 
-enum NotchState { case collapsed, peek, media, clipboard, shelf, search }
+enum NotchState { case collapsed, peek, media, clipboard, shelf, search, calculator, locked }
+
+/// While the Mac is locked: `.locked` shows the padlock, `.unlocking` shows the open padlock for a moment.
+enum LockPhase { case unlocked, locked, unlocking }
 
 @MainActor
 final class NotchViewModel: ObservableObject {
@@ -26,6 +29,10 @@ final class NotchViewModel: ObservableObject {
     let clipboard = ClipboardHistory()
     let search = SpotlightSearch()
     let shelf = FileShelf()
+    let calc = CalculatorModel()
+    let lock = LockMonitor()
+    @Published private(set) var lockPhase: LockPhase = .unlocked
+    private var lockTask: Task<Void, Never>?
     weak var panel: NSPanel?                       // set by the window controller
 
     var notch = CGSize(width: 190, height: 32) {
@@ -42,6 +49,12 @@ final class NotchViewModel: ObservableObject {
     private var bag = Set<AnyCancellable>()
 
     init() {
+        // Screen locked / unlocked.
+        lock.events
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] locked in self?.lockChanged(locked) }
+            .store(in: &bag)
+
         // New song starts -> briefly show it.
         media.trackChanged
             .receive(on: DispatchQueue.main)
@@ -68,6 +81,13 @@ final class NotchViewModel: ObservableObject {
             return CGSize(width: 330 + ear, height: n.height + 64)
         case .media, .clipboard, .shelf:
             return CGSize(width: 400 + ear, height: n.height + 185)
+        case .calculator:
+            return CGSize(width: 400 + ear, height: n.height + 200)
+        case .locked:
+            // With a track: compact player. Without: just the notch pill with a padlock.
+            return media.hasTrack
+                ? CGSize(width: 340 + ear, height: n.height + 130)
+                : CGSize(width: n.width + 100, height: n.height)
         case .search:
             let rows = min(search.results.count, 9)
             return CGSize(width: 480 + ear, height: n.height + 70 + CGFloat(rows) * 40)
@@ -102,7 +122,7 @@ final class NotchViewModel: ObservableObject {
                 try? await Task.sleep(for: .milliseconds(delay))
                 if !Task.isCancelled { setState(AppSettings.shared.defaultPage) }
             }
-        } else if state == .media || state == .clipboard || state == .shelf {
+        } else if state == .media || state == .clipboard || state == .shelf || state == .calculator {
             hoverTask = Task {
                 try? await Task.sleep(for: .milliseconds(250))
                 if !Task.isCancelled { setState(.collapsed) }
@@ -126,7 +146,7 @@ final class NotchViewModel: ObservableObject {
         hoverTask?.cancel()
         if targeted {
             peekTask?.cancel()
-            if state != .search, AppSettings.shared.isOn(.tabShelf) { setState(.shelf) }
+            if state != .search, state != .locked, AppSettings.shared.isOn(.tabShelf) { setState(.shelf) }
         } else if state == .shelf {
             // Drag left without a drop (or a drop just finished): collapse only if the pointer is gone.
             hoverTask = Task {
@@ -149,6 +169,7 @@ final class NotchViewModel: ObservableObject {
     /// Open the clipboard tab from the keyboard. Since the pointer isn't on the island,
     /// it closes by itself after a few idle seconds (unless you move onto it).
     func openClipboard() {
+        guard state != .locked else { return }
         hoverTask?.cancel()
         peekTask?.cancel()
         setState(.clipboard)
@@ -161,9 +182,37 @@ final class NotchViewModel: ObservableObject {
         }
     }
 
+    // MARK: - Lock screen
+
+    /// True when locked and nothing is playing: drawn like the collapsed notch, plus a padlock.
+    var isCompactLock: Bool { state == .locked && !media.hasTrack }
+
+    private func lockChanged(_ locked: Bool) {
+        lockTask?.cancel()
+        hoverTask?.cancel()
+        peekTask?.cancel()
+
+        if locked {
+            guard AppSettings.shared.isOn(.lockScreen) else { print("Lock screen island is switched off in the menu"); return }
+            query = ""
+            lockPhase = .locked
+            setState(.locked)
+        } else {
+            guard state == .locked else { lockPhase = .unlocked; return }
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) { lockPhase = .unlocking }
+            lockTask = Task {
+                try? await Task.sleep(for: .milliseconds(1100))     // let the open padlock be seen
+                guard !Task.isCancelled else { return }
+                lockPhase = .unlocked
+                setState(.collapsed)
+            }
+        }
+    }
+
     // MARK: - Search
 
     func openSearch() {
+        guard state != .locked else { return }
         hoverTask?.cancel()
         peekTask?.cancel()
         query = ""

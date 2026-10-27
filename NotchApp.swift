@@ -61,7 +61,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         menu.addItem(settingItem("Music", .tabMedia))
         menu.addItem(settingItem("Clipboard", .tabClipboard))
         menu.addItem(settingItem("File Shelf", .tabShelf))
+        menu.addItem(settingItem("Calculator", .tabCalculator))
         menu.addItem(settingItem("Search", .tabSearch))
+
+        menu.addItem(.separator())
+        menu.addItem(.sectionHeader(title: "Lock Screen"))
+        menu.addItem(settingItem("Show island when locked", .lockScreen))
 
         menu.addItem(.separator())
 

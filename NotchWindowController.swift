@@ -45,6 +45,15 @@ final class NotchWindowController {
 
         if let s = screen { vm.notch = Self.notchSize(of: s) }
 
+        // First time the Mac locks: move the panel into a space that sits above the lock screen.
+        vm.lock.events
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] locked in
+                guard let self, locked, AppSettings.shared.isOn(.lockScreen) else { return }
+                LockScreenSpace.attach(self.panel)
+            }
+            .store(in: &bag)
+
         // Take keyboard focus once, when search opens.
         vm.$state
             .removeDuplicates()
@@ -84,6 +93,7 @@ final class NotchWindowController {
     func show() {
         panel.orderFrontRegardless()
         apply(fixedWindowSize())
+        if AppSettings.shared.isOn(.lockScreen) { LockScreenSpace.attach(panel) }
     }
 
     // MARK: - Geometry
@@ -107,7 +117,7 @@ final class NotchWindowController {
     private func fixedWindowSize() -> CGSize {
         let n = vm.notch
         let ear = 2 * NotchLayout.ear
-        let states: [NotchState] = [.collapsed, .peek, .media, .clipboard, .shelf]
+        let states: [NotchState] = [.collapsed, .peek, .media, .clipboard, .shelf, .calculator, .locked]
         // Search is the tallest: field + up to 9 result rows (keep in sync with NotchViewModel.size).
         let sizes = states.map { vm.size(for: $0) }
             + [CGSize(width: 480 + ear, height: n.height + 70 + 9 * 40)]

@@ -35,7 +35,8 @@ final class AppSettings: ObservableObject {
 
     enum Key: String, CaseIterable {
         case searchHotkey, clipboardHotkey
-        case tabMedia, tabClipboard, tabShelf, tabSearch
+        case tabMedia, tabClipboard, tabShelf, tabSearch, tabCalculator
+        case lockScreen
     }
 
     /// The tabs the island opens on when you hover it. At least one must stay on.
