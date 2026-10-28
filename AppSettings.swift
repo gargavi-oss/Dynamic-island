@@ -35,8 +35,9 @@ final class AppSettings: ObservableObject {
 
     enum Key: String, CaseIterable {
         case searchHotkey, clipboardHotkey
-        case tabMedia, tabClipboard, tabShelf, tabSearch, tabCalculator
+        case tabMedia, tabClipboard, tabShelf, tabSearch, tabCalculator, tabAudio
         case lockScreen
+        case autoCheckUpdates
     }
 
     /// The tabs the island opens on when you hover it. At least one must stay on.
@@ -48,7 +49,9 @@ final class AppSettings: ObservableObject {
     private let defaults = UserDefaults.standard
 
     private init() {
-        defaults.register(defaults: Dictionary(uniqueKeysWithValues: Key.allCases.map { ($0.rawValue, true) }))
+        var initial = Dictionary(uniqueKeysWithValues: Key.allCases.map { ($0.rawValue, true) })
+        initial[Key.autoCheckUpdates.rawValue] = false      // network access is opt-in
+        defaults.register(defaults: initial)
     }
 
     /// Hotkeys macOS refused to register because another app already owns them.

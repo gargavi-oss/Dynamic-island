@@ -18,6 +18,7 @@ final class NotchWindowController {
     private var bag = Set<AnyCancellable>()
     private var searchHotKey: GlobalHotKey?
     private var clipboardHotKey: GlobalHotKey?
+    private var hadKeyboardFocus = false
 
 
     /// Prefer the screen that has a physical notch. Can be nil for a moment while displays reconfigure
@@ -54,13 +55,19 @@ final class NotchWindowController {
             }
             .store(in: &bag)
 
-        // Take keyboard focus once, when search opens.
+        // Take keyboard focus when search or the calculator opens; hand it back when they close.
         vm.$state
             .removeDuplicates()
             .receive(on: DispatchQueue.main)
             .sink { [weak self] state in
-                guard state == .search else { return }
-                self?.focusPanel()
+                guard let self else { return }
+                let wantsKeyboard = state == .search || state == .calculator
+                if wantsKeyboard {
+                    self.focusPanel()
+                } else if self.hadKeyboardFocus, self.panel.isKeyWindow {
+                    NSApp.deactivate()          // typing goes back to the app you were in
+                }
+                self.hadKeyboardFocus = wantsKeyboard
             }
             .store(in: &bag)
 
@@ -68,7 +75,7 @@ final class NotchWindowController {
         NotificationCenter.default
             .publisher(for: NSWindow.didResignKeyNotification, object: panel)
             .sink { [weak self] _ in
-                guard let self, self.vm.state == .search else { return }
+                guard let self, self.vm.state == .search || self.vm.state == .calculator else { return }
                 self.vm.close()
             }
             .store(in: &bag)
@@ -117,7 +124,7 @@ final class NotchWindowController {
     private func fixedWindowSize() -> CGSize {
         let n = vm.notch
         let ear = 2 * NotchLayout.ear
-        let states: [NotchState] = [.collapsed, .peek, .media, .clipboard, .shelf, .calculator, .locked]
+        let states: [NotchState] = [.collapsed, .peek, .media, .clipboard, .shelf, .audio, .calculator, .locked]
         // Search is the tallest: field + up to 9 result rows (keep in sync with NotchViewModel.size).
         let sizes = states.map { vm.size(for: $0) }
             + [CGSize(width: 480 + ear, height: n.height + 70 + 9 * 40)]

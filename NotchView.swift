@@ -39,6 +39,7 @@ struct NotchShape: Shape {
 struct NotchView: View {
     @ObservedObject var vm: NotchViewModel
     @State private var dropTargeted = false
+    @State private var panelTargeted = false
 
     var body: some View {
         let expanded = vm.state != .collapsed && !vm.isCompactLock
@@ -57,6 +58,8 @@ struct NotchView: View {
                 expandedContent(.clipboard) { ClipboardView(vm: vm, clip: vm.clipboard) }
             case .shelf:
                 expandedContent(.shelf) { ShelfView(vm: vm, shelf: vm.shelf) }
+            case .audio:
+                expandedContent(.audio) { AudioView(vm: vm, audio: vm.audio, volume: vm.volume) }
             case .search:
                 expandedContent(.search) { SearchView(vm: vm, search: vm.search) }
             case .calculator:
@@ -80,7 +83,7 @@ struct NotchView: View {
         .clipShape(NotchShape(topRadius: expanded ? NotchLayout.ear : 0,
                               bottomRadius: expanded ? 26 : 10))
         .onHover { vm.hoverChanged($0) }
-        .onDrop(of: [.fileURL], isTargeted: $dropTargeted) { providers in
+        .onDrop(of: [.fileURL, .image, .pdf], isTargeted: $dropTargeted) { providers in
             AppSettings.shared.isOn(.tabShelf) ? vm.shelf.handleDrop(providers) : false
         }
         .onChange(of: dropTargeted) { _, targeted in vm.dropTargetChanged(targeted) }
@@ -92,6 +95,13 @@ struct NotchView: View {
         }
         // The window can be larger than the island while it animates: keep the island pinned to the top.
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        // While the shelf is open, accept drops anywhere in the (transparent) window too,
+        // so a drop that lands a little below or beside the island still counts.
+        .contentShape(Rectangle())
+        .onDrop(of: vm.state == .shelf ? [.fileURL, .image, .pdf] : [], isTargeted: $panelTargeted) { providers in
+            vm.shelf.handleDrop(providers)
+        }
+        .onChange(of: panelTargeted) { _, targeted in vm.dropTargetChanged(targeted) }
         .preferredColorScheme(.dark)
         .ignoresSafeArea()
     }
@@ -131,11 +141,16 @@ struct CollapsedView: View {
     var body: some View {
         HStack {
             if media.hasTrack {                       // shown while playing AND while paused
-                ArtworkView(image: media.artwork)
-                    .frame(width: 22, height: 22)
-                    .clipShape(RoundedRectangle(cornerRadius: 5))
-                    .opacity(media.isPlaying ? 1 : 0.6)
-                    .transition(.opacity.combined(with: .scale(scale: 0.6)))
+                let d = min(26, notch.height - 4)          // ring size, fits the menu-bar height
+                ZStack {
+                    ArtworkView(image: media.artwork)
+                        .frame(width: d - 6, height: d - 6)
+                        .clipShape(Circle())
+                    if media.duration > 0 { ProgressRing(media: media) }
+                }
+                .frame(width: d, height: d)
+                .opacity(media.isPlaying ? 1 : 0.6)
+                .transition(.opacity.combined(with: .scale(scale: 0.6)))
                 Spacer(minLength: notch.width)        // keeps content clear of the physical notch
                 Group {
                     if media.isPlaying {
@@ -203,6 +218,7 @@ struct TabBar: View {
             if settings.isOn(.tabMedia) { tab("music.note", .media) }
             if settings.isOn(.tabClipboard) { tab("doc.on.clipboard", .clipboard) }
             if settings.isOn(.tabShelf) { tab("tray", .shelf) }
+            if settings.isOn(.tabAudio) { tab("speaker.wave.2", .audio) }
             if settings.isOn(.tabCalculator) { tab("plus.forwardslash.minus", .calculator) }
             if settings.isOn(.tabSearch) { tab("magnifyingglass", .search) }
             Spacer()
@@ -567,6 +583,7 @@ struct ShelfView: View {
                 VStack(spacing: 6) {
                     Image(systemName: "tray.and.arrow.down").font(.title2)
                     Text("Drop files here, drag them out anywhere").font(.callout)
+                    Text("Photos and PDFs can be converted too").font(.caption).opacity(0.7)
                 }
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -578,7 +595,11 @@ struct ShelfView: View {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 10) {
                         ForEach(shelf.items) { item in
-                            ShelfTile(item: item) { shelf.remove(item) }
+                            ShelfTile(item: item,
+                                      selected: item.id == shelf.selectedItem?.id,
+                                      onSelect: { shelf.selectedID = item.id },
+                                      onConvert: { shelf.convert(item, to: $0) },
+                                      onRemove: { shelf.remove(item) })
                                 .transition(.opacity.combined(with: .scale(scale: 0.8)))
                         }
                     }
@@ -586,6 +607,14 @@ struct ShelfView: View {
                     .animation(.spring(response: 0.3, dampingFraction: 0.8), value: shelf.items)
                 }
                 .frame(maxHeight: .infinity)
+
+                if let item = shelf.selectedItem {
+                    ConvertBar(shelf: shelf, item: item)
+                } else {
+                    Text("Drop a photo or PDF here to convert it")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .frame(height: 24)
+                }
             }
         }
         .padding(.horizontal, 16)
@@ -594,8 +623,41 @@ struct ShelfView: View {
     }
 }
 
+/// "Convert to: HEIC PNG JPEG ..." for the selected photo / PDF. Works offline.
+struct ConvertBar: View {
+    @ObservedObject var shelf: FileShelf
+    let item: ShelfItem
+
+    var body: some View {
+        HStack(spacing: 6) {
+            if shelf.converting { ProgressView().controlSize(.small) }
+            else { Image(systemName: "arrow.triangle.2.circlepath").font(.caption).foregroundStyle(.secondary) }
+
+            if let message = shelf.message {
+                Text(message).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            } else {
+                ForEach(ImageFormat.allCases.filter { $0 != item.format }) { format in
+                    Button { shelf.convert(item, to: format) } label: {
+                        Text(format.title)
+                            .font(.caption.weight(.medium))
+                            .padding(.horizontal, 9)
+                            .frame(height: 22)
+                            .background(Color.white.opacity(0.14), in: Capsule())
+                    }
+                    .buttonStyle(PressStyle())
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .frame(height: 24)
+    }
+}
+
 struct ShelfTile: View {
     let item: ShelfItem
+    let selected: Bool
+    let onSelect: () -> Void
+    let onConvert: (ImageFormat) -> Void
     let onRemove: () -> Void
     @State private var hovering = false
 
@@ -621,16 +683,103 @@ struct ShelfTile: View {
                 .frame(width: 64)
         }
         .frame(width: 70)
+        .padding(.vertical, 3)
+        .background(selected && item.canConvert ? Color.white.opacity(0.12) : Color.clear,
+                    in: RoundedRectangle(cornerRadius: 10, style: .continuous))
         .contentShape(Rectangle())
         .scaleEffect(hovering ? 1.05 : 1)
         .onHover { hovering = $0 }
         .animation(.spring(response: 0.25, dampingFraction: 0.7), value: hovering)
         .onTapGesture(count: 2) { NSWorkspace.shared.open(item.url) }
+        .onTapGesture { onSelect() }
         .onDrag { NSItemProvider(contentsOf: item.url) ?? NSItemProvider() }
         .contextMenu {
+            if item.canConvert {
+                Menu("Convert to") {
+                    ForEach(ImageFormat.allCases.filter { $0 != item.format }) { format in
+                        Button(format.title) { onConvert(format) }
+                    }
+                }
+            }
             Button("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting([item.url]) }
             Button("Remove") { onRemove() }
         }
+    }
+}
+
+// MARK: - Audio output
+
+struct AudioView: View {
+    @ObservedObject var vm: NotchViewModel
+    @ObservedObject var audio: AudioSwitcher
+    @ObservedObject var volume: VolumeController
+
+    var body: some View {
+        VStack(spacing: 8) {
+            TabBar(vm: vm)
+            if audio.outputs.isEmpty {
+                Text("No sound outputs found")
+                    .font(.callout).foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 10) {
+                        ForEach(audio.outputs) { device in
+                            AudioTile(device: device, selected: device.id == audio.defaultID) {
+                                audio.select(device)
+                            }
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+                .frame(maxHeight: .infinity)
+            }
+            HStack(spacing: 8) {
+                Image(systemName: "speaker.fill").font(.caption).foregroundStyle(.secondary)
+                Slider(value: Binding(get: { volume.level }, set: { volume.set($0) }),
+                       in: 0...100) { editing in volume.dragging = editing }
+                Image(systemName: "speaker.wave.3.fill").font(.caption).foregroundStyle(.secondary)
+            }
+            .frame(height: 22)
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 4)
+        .padding(.bottom, 14)
+        .task {
+            while !Task.isCancelled {
+                volume.refresh()
+                try? await Task.sleep(for: .seconds(1))
+            }
+        }
+    }
+}
+
+struct AudioTile: View {
+    let device: AudioDevice
+    let selected: Bool
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 4) {
+                Image(systemName: device.symbol)
+                    .font(.system(size: 18))
+                    .frame(width: 44, height: 44)
+                    .background(selected ? Color.white.opacity(0.22) : Color.white.opacity(0.09), in: Circle())
+                    .overlay(Circle().strokeBorder(Color.green, lineWidth: selected ? 2 : 0))
+                Text(device.name)
+                    .font(.caption2)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+                    .frame(width: 66, height: 26, alignment: .top)
+            }
+            .frame(width: 72)
+            .scaleEffect(hovering ? 1.05 : 1)
+        }
+        .buttonStyle(PressStyle())
+        .onHover { hovering = $0 }
+        .animation(.spring(response: 0.25, dampingFraction: 0.7), value: hovering)
     }
 }
 
@@ -639,6 +788,7 @@ struct ShelfTile: View {
 struct CalculatorView: View {
     @ObservedObject var vm: NotchViewModel
     @ObservedObject var calc: CalculatorModel
+    @FocusState private var focused: Bool
 
     private let rows: [[String]] = [
         ["C", "(", ")", "÷"],
@@ -660,6 +810,37 @@ struct CalculatorView: View {
         .padding(.horizontal, 16)
         .padding(.top, 4)
         .padding(.bottom, 14)
+        // Keyboard: digits, + - * / x ^ ( ) . | Return or = | Delete | C or Clear | ⌘V paste | ⌘C copy | Esc close
+        .focusable()
+        .focusEffectDisabled()
+        .focused($focused)
+        .onKeyPress(phases: [.down, .repeat]) { handleKey($0) }
+        .onAppear { focused = true }
+    }
+
+    private func handleKey(_ press: KeyPress) -> KeyPress.Result {
+        if press.modifiers.contains(.command) {
+            switch press.characters.lowercased() {
+            case "v": calc.paste(); return .handled
+            case "c": calc.copyResult(); return .handled
+            default: return .ignored
+            }
+        }
+        if press.key == .return || press.characters == "\u{3}" { calc.press("="); return .handled }
+        if press.key == .delete { calc.press("⌫"); return .handled }
+        if press.key == .clear { calc.press("C"); return .handled }
+        if press.key == .escape { vm.close(); return .handled }
+
+        guard let ch = press.characters.first else { return .ignored }
+        switch ch {
+        case "0"..."9", ".", "(", ")", "^", "+", "=": calc.press(String(ch))
+        case "-":                                       calc.press("−")
+        case "*", "x", "X":                             calc.press("×")
+        case "/":                                       calc.press("÷")
+        case "c", "C":                                  calc.press("C")
+        default: return .ignored
+        }
+        return .handled
     }
 
     private var display: some View {
@@ -778,5 +959,25 @@ struct LockedView: View {
                 .contentTransition(.symbolEffect(.replace))
         }
         .buttonStyle(PressStyle())
+    }
+}
+
+/// Thin circular progress ring drawn around the round artwork in the collapsed island.
+struct ProgressRing: View {
+    @ObservedObject var media: MediaController
+
+    var body: some View {
+        // ~15 fps is smooth enough for a small ring; the timeline sleeps while paused.
+        TimelineView(.animation(minimumInterval: 1.0 / 15.0, paused: !media.isPlaying)) { ctx in
+            let total = media.duration
+            let fraction = total > 0 ? min(max(media.elapsed(at: ctx.date) / total, 0), 1) : 0
+            ZStack {
+                Circle().stroke(Color.white.opacity(0.2), lineWidth: 2)
+                Circle()
+                    .trim(from: 0, to: fraction)
+                    .stroke(Color.white, style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                    .rotationEffect(.degrees(-90))      // start at 12 o'clock
+            }
+        }
     }
 }

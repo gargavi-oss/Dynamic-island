@@ -32,6 +32,17 @@ final class CalculatorModel: ObservableObject {
         }
     }
 
+    /// ⌘V: take the clipboard text if it looks like math.
+    func paste() {
+        guard let text = NSPasteboard.general.string(forType: .string) else { return }
+        let allowed = Set("0123456789.+-−*/^()×÷x")
+        let cleaned = String(text.lowercased().filter { allowed.contains($0) }.prefix(60))
+            .replacingOccurrences(of: "−", with: "-")
+        guard !cleaned.isEmpty else { return }
+        expression = cleaned
+        justEvaluated = false
+    }
+
     func copyResult() {
         let text = result ?? expression
         guard !text.isEmpty else { return }

@@ -1,8 +1,9 @@
 import SwiftUI
 import AppKit
 import Combine
+import UniformTypeIdentifiers
 
-enum NotchState { case collapsed, peek, media, clipboard, shelf, search, calculator, locked }
+enum NotchState { case collapsed, peek, media, clipboard, shelf, audio, search, calculator, locked }
 
 /// While the Mac is locked: `.locked` shows the padlock, `.unlocking` shows the open padlock for a moment.
 enum LockPhase { case unlocked, locked, unlocking }
@@ -30,6 +31,7 @@ final class NotchViewModel: ObservableObject {
     let search = SpotlightSearch()
     let shelf = FileShelf()
     let calc = CalculatorModel()
+    let audio = AudioSwitcher()
     let lock = LockMonitor()
     @Published private(set) var lockPhase: LockPhase = .unlocked
     private var lockTask: Task<Void, Never>?
@@ -67,6 +69,8 @@ final class NotchViewModel: ObservableObject {
             .receive(on: DispatchQueue.main)       // @Published fires before the value changes
             .sink { [weak self] in self?.refreshSize() }
             .store(in: &bag)
+
+        startDragWatcher()
     }
 
     // MARK: - Size
@@ -79,7 +83,7 @@ final class NotchViewModel: ObservableObject {
             return CGSize(width: n.width + (media.hasTrack ? 100 : 0), height: n.height)
         case .peek:
             return CGSize(width: 330 + ear, height: n.height + 64)
-        case .media, .clipboard, .shelf:
+        case .media, .clipboard, .shelf, .audio:
             return CGSize(width: 400 + ear, height: n.height + 185)
         case .calculator:
             return CGSize(width: 400 + ear, height: n.height + 200)
@@ -122,7 +126,9 @@ final class NotchViewModel: ObservableObject {
                 try? await Task.sleep(for: .milliseconds(delay))
                 if !Task.isCancelled { setState(AppSettings.shared.defaultPage) }
             }
-        } else if state == .media || state == .clipboard || state == .shelf || state == .calculator {
+        } else if state == .media || state == .clipboard || state == .shelf || state == .audio || state == .calculator {
+            // Typing in the calculator: stay open until you click away or press Esc.
+            if state == .calculator, panel?.isKeyWindow == true { return }
             hoverTask = Task {
                 try? await Task.sleep(for: .milliseconds(250))
                 if !Task.isCancelled { setState(.collapsed) }
@@ -153,6 +159,52 @@ final class NotchViewModel: ObservableObject {
                 try? await Task.sleep(for: .milliseconds(700))
                 guard !Task.isCancelled, state == .shelf, !pointerInsideIsland else { return }
                 setState(.collapsed)
+            }
+        }
+    }
+
+    // MARK: - Drag watcher
+
+    private var dragMonitor: Any?
+    private var lastDragChange = NSPasteboard(name: .drag).changeCount
+
+    /// Opens the shelf as soon as a file / picture drag comes close to the notch,
+    /// so you don't have to hit the small collapsed pill exactly.
+    private func startDragWatcher() {
+        dragMonitor = NSEvent.addGlobalMonitorForEvents(matching: .leftMouseDragged) { [weak self] _ in
+            MainActor.assumeIsolated { self?.mouseDragged() }
+        }
+    }
+
+    private func mouseDragged() {
+        let pb = NSPasteboard(name: .drag)
+        if state == .shelf { lastDragChange = pb.changeCount; return }      // e.g. dragging a tile out
+        guard state == .collapsed || state == .peek,
+              AppSettings.shared.isOn(.tabShelf),
+              pb.changeCount != lastDragChange,
+              let f = panel?.frame else { return }
+
+        let p = NSEvent.mouseLocation
+        let halfWidth = max(notch.width / 2 + 70, 150)
+        guard abs(p.x - f.midX) < halfWidth, p.y > f.maxY - 90 else { return }
+
+        // Only real drags of files or pictures (not text selections or window moves).
+        let carriesFiles = (pb.types ?? []).contains { type in
+            type == .fileURL || (UTType(type.rawValue).map { $0.conforms(to: .image) || $0.conforms(to: .pdf) } ?? false)
+        }
+        guard carriesFiles else { return }
+
+        lastDragChange = pb.changeCount
+        hoverTask?.cancel()
+        peekTask?.cancel()
+        setState(.shelf)
+
+        // If the drag never lands on the island, tuck it away again once the mouse is released.
+        hoverTask = Task {
+            try? await Task.sleep(for: .seconds(1))
+            while !Task.isCancelled, state == .shelf {
+                if !pointerInsideIsland, NSEvent.pressedMouseButtons == 0 { setState(.collapsed); return }
+                try? await Task.sleep(for: .milliseconds(500))
             }
         }
     }

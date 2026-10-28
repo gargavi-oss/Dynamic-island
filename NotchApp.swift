@@ -22,6 +22,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         controller = NotchWindowController()
         controller?.show()
         setupStatusItem()
+        ImageConverter.cleanTemp()              // converted files from the last run
+        if AppSettings.shared.isOn(.autoCheckUpdates), UpdateChecker.isDue {
+            Task { await runUpdateCheck(manual: false) }
+        }
     }
 
     // MARK: - Menu bar item (settings, Launch at Login, Quit)
@@ -61,12 +65,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         menu.addItem(settingItem("Music", .tabMedia))
         menu.addItem(settingItem("Clipboard", .tabClipboard))
         menu.addItem(settingItem("File Shelf", .tabShelf))
+        menu.addItem(settingItem("Audio", .tabAudio))
         menu.addItem(settingItem("Calculator", .tabCalculator))
         menu.addItem(settingItem("Search", .tabSearch))
 
         menu.addItem(.separator())
         menu.addItem(.sectionHeader(title: "Lock Screen"))
         menu.addItem(settingItem("Show island when locked", .lockScreen))
+
+        menu.addItem(.separator())
+        menu.addItem(.sectionHeader(title: "Updates"))
+        let version = NSMenuItem(title: "Version \(UpdateChecker.currentVersion)", action: nil, keyEquivalent: "")
+        version.indentationLevel = 1
+        menu.addItem(version)
+        let check = NSMenuItem(title: "Check for Updates…", action: #selector(checkForUpdates), keyEquivalent: "")
+        check.target = self
+        check.indentationLevel = 1
+        menu.addItem(check)
+        menu.addItem(settingItem("Check automatically (daily)", .autoCheckUpdates))
 
         menu.addItem(.separator())
 
@@ -132,6 +148,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         guard let raw = sender.representedObject as? String,
               let shortcut = ClipboardShortcut(rawValue: raw) else { return }
         AppSettings.shared.clipboardShortcut = shortcut
+    }
+
+    @objc private func checkForUpdates() { Task { await runUpdateCheck(manual: true) } }
+
+    /// Automatic checks stay silent unless there is something new; manual ones always answer.
+    private func runUpdateCheck(manual: Bool) async {
+        switch await UpdateChecker.check() {
+        case .available(let version, let page):
+            UpdateChecker.markChecked()
+            showAlert("Version \(version) is available",
+                      "You have \(UpdateChecker.currentVersion).", download: page)
+        case .upToDate:
+            UpdateChecker.markChecked()
+            if manual { showAlert("You're up to date", "Notch Island \(UpdateChecker.currentVersion) is the latest version.") }
+        case .failed(let reason):
+            if manual { showAlert("Couldn't check for updates", reason) }
+        }
+    }
+
+    private func showAlert(_ title: String, _ text: String, download: URL? = nil) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = text
+        alert.addButton(withTitle: download == nil ? "OK" : "Download")
+        if download != nil { alert.addButton(withTitle: "Later") }
+        NSApp.activate(ignoringOtherApps: true)
+        if alert.runModal() == .alertFirstButtonReturn, let download { NSWorkspace.shared.open(download) }
     }
 
     @objc private func toggleLogin() { LaunchAtLogin.set(!LaunchAtLogin.isEnabled) }
